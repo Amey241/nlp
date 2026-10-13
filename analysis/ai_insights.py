@@ -53,30 +53,6 @@ class AIInsights:
         except:
             return ["Backend Architect", "Product Engineer", "DevOps Specialist"]
 
-    def analyze_review_personality(self, review_comments: list) -> dict:
-        """Analyze PR review comments to determine reviewer archetype."""
-        if not self.client or not review_comments:
-            return {"archetype": "The Observer", "trait": "Neutral", "advice": "Leave more detailed feedback."}
-        
-        comments_str = "\n".join(review_comments[:10])
-        prompt = f"""
-        Analyze these PR review comments and determine the reviewer's personality archetype.
-        Comments:
-        {comments_str}
-        
-        Return a JSON object with:
-        - "archetype": (e.g., 'The Pedant', 'The Enthusiast', 'The Grumpy Senior', 'The Mentor')
-        - "trait": (1-word descriptor)
-        - "advice": (1-sentence advice for improving communication)
-        """
-        system = "You are a team dynamics expert. Analyze the tone and substance of code reviews."
-        
-        res = self._call_claude(prompt, system)
-        try:
-            return json.loads(res)
-        except:
-            return {"archetype": "The Pragmatist", "trait": "Direct", "advice": "Balance your critiques with positive reinforcement."}
-
     def suggest_commit_rewrites(self, low_quality_commits: list) -> list:
         """Suggest better commit messages for low-quality commits."""
         if not self.client or not low_quality_commits:

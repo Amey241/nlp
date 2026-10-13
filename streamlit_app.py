@@ -125,17 +125,6 @@ st.markdown("""
     font-weight: 600;
   }
 
-  /* Repo Health Pills */
-  .health-pill {
-    padding: 0.1rem 0.5rem;
-    border-radius: 4px;
-    font-size: 0.7rem;
-    font-weight: 800;
-    text-transform: uppercase;
-  }
-  .health-pass { background: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.4); }
-  .health-fail { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); }
-
   /* Comparison Styles */
   .comp-label {
     font-size: 0.8rem; color: #CBD5E1; margin-bottom: 0.2rem; font-weight: 600;
@@ -222,30 +211,28 @@ def _render_topics(topics_data: dict) -> None:
         return
     dominant = topics_data["dominant_topic"]
     emoji = _topic_emoji(dominant)
+    topic_rows = []
+    for topic in topics_data["topics"]:
+        words_html = " ".join(f'<span class="topic-pill">{word}</span>' for word in topic["top_words"])
+        topic_rows.append(
+            f'<div style="margin-bottom:0.4rem;">'
+            f'<span style="color:#CBD5E1;font-size:0.8rem;">Topic {topic["index"]+1} ({topic["label"]}):</span><br>'
+            f'{words_html}</div>'
+        )
+    topics_html = "".join(topic_rows)
     st.markdown(f"""
     <div class="glass-card">
       <div style="font-weight:600;color:#CBD5E1;margin-bottom:0.5rem;text-transform:uppercase;font-size:0.75rem;">🗂 Dominant Commit Theme</div>
-      <div style="font-size:1.5rem;font-weight:800;color:#FFFFFF;margin-bottom:0.75rem;">
-        {emoji} {dominant.title()}
-      </div>
+      <div style="font-size:1.5rem;font-weight:800;color:#FFFFFF;margin-bottom:0.75rem;">{emoji} {dominant.title()}</div>
+      {topics_html}
+    </div>
     """, unsafe_allow_html=True)
-
-    for t in topics_data["topics"]:
-        words_html = " ".join(f'<span class="topic-pill">{w}</span>' for w in t["top_words"])
-        st.markdown(
-            f'<div style="margin-bottom:0.4rem;">'
-            f'<span style="color:#CBD5E1;font-size:0.8rem;">Topic {t["index"]+1} ({t["label"]}):</span><br>'
-            f'{words_html}</div>',
-            unsafe_allow_html=True,
-        )
-    st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ------------------------------------------------------------------ #
 #  Imports
 # ------------------------------------------------------------------ #
 import pandas as pd
-import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from PIL import Image
@@ -268,18 +255,14 @@ from config import *
 from data.fetcher import GitHubFetcher
 from analysis.languages import aggregate_languages, radar_chart, bar_chart
 from analysis.activity import build_heatmap_data, activity_heatmap, peak_hours_summary
-from analysis.nlp import sentiment_analysis, lda_topics
-from analysis.personality import classify, generate_narrative, achievement_trophy_case, time_capsule_message
-from analysis.wordcloud_gen import generate_wordcloud
+from analysis.nlp import sentiment_analysis, lda_topics, commit_message_insights
+from analysis.personality import classify, generate_narrative, achievement_trophy_case
 from analysis.card_generator import generate_card
 from analysis.commit_quality import score_commits
 from analysis.comparison import overlay_radar, compatibility_score, highlight_differences
-from analysis.repo_health import score_repo, aggregate_health
-from analysis.career_arc import analyze_career_arc, career_arc_timeline
-from analysis.code_dna import analyze_style, generate_dna_svg
-from analysis.ecosystem import build_ecosystem_graph
 from analysis.ai_insights import AIInsights
-from analysis.deep_metrics import estimate_bus_factor, calculate_streaks, invisible_work_audit, ghost_repo_audit
+from analysis.deep_metrics import calculate_streaks, ghost_repo_audit
+from utils.repo_nlp_view import render_repository_nlp
 
 
 # ------------------------------------------------------------------ #
@@ -312,16 +295,11 @@ def run_pipeline(username: str, _token_override: str = "") -> dict:
         activity      = peak_hours_summary(heatmap_pivot)
         sentiment     = sentiment_analysis([c["message"] for c in commits])
         topics        = lda_topics([c["message"] for c in commits])
+        message_insights = commit_message_insights([c["message"] for c in commits])
         
-        # Wordcloud (proper arg)
-        wc_path = generate_wordcloud([c["message"] for c in commits])
         
         # Commit Quality (synced name)
         quality = score_commits([c["message"] for c in commits])
-        
-        # Repo Health (manual loop + aggregate)
-        repo_scores = [score_repo(r) for r in raw["repos"]]
-        health_stats = aggregate_health(repo_scores)
         
         # User Stats for Personality/Narrative/Achievements
         user_stats = {
@@ -338,51 +316,20 @@ def run_pipeline(username: str, _token_override: str = "") -> dict:
         narrative = generate_narrative(user_stats, raw["profile"])
         achievements = achievement_trophy_case(user_stats, raw["profile"], lang_df)
 
-        # Deep Style Audit & Code DNA (Extracted from unified fetch)
-        try:
-            code_samples = raw.get("all_samples", [])
-            dna_traits = analyze_style(code_samples)
-            dna_svg = generate_dna_svg(dna_traits)
-        except Exception:
-            dna_traits, dna_svg = {}, ""
-
-        # Collaboration & Ecosystem (Extracted from unified fetch)
-        try:
-            repo_deps = raw.get("all_deps", {})
-            ecosystem_html = build_ecosystem_graph(repo_deps)
-        except Exception:
-            repo_deps, ecosystem_html = {}, ""
-
         status.update(label="🎨 Generating AI Insights...", state="running")
         try:
             ai = AIInsights()
             job_roles = ai.get_job_role_suggestions(user_stats, lang_df)
-            review_comments = fetcher.get_review_comments(username)
-            review_personality = ai.analyze_review_personality(review_comments)
             low_q_commits = [m for m, s, g in quality.get("worst_examples", [])[:3]]
             rewrites = ai.suggest_commit_rewrites(low_q_commits)
         except Exception:
-            job_roles, review_personality, rewrites = [], {"archetype": "The Observer", "trait": "Neutral", "advice": ""}, []
+            job_roles, rewrites = [], []
 
-        # Deep Metrics
         try:
-            bus_stats = estimate_bus_factor(raw["repos"])
             streak_stats = calculate_streaks(commits)
-            arc_df = analyze_career_arc(commits)
-            arc_viz = career_arc_timeline(arc_df)
-            capsule = time_capsule_message(arc_df, raw["profile"])
-            invisible_stats = invisible_work_audit({
-                "prs_authored": raw["prs_authored"],
-                "issues_authored": raw["issues_authored"],
-                "pr_reviews_count": raw.get("pr_reviews_count", 0),
-                "issue_comments_count": raw.get("issue_comments_count", 0),
-            })
             ghosts = ghost_repo_audit(raw["repos"])
         except Exception:
-            bus_stats = {"factors": [], "avg_factor": 0, "risk": "Unknown"}
             streak_stats = {"current": 0, "longest": 0}
-            arc_df, arc_viz, capsule = pd.DataFrame(), None, ""
-            invisible_stats = {"prs": 0, "issues": 0, "reviews": 0, "issue_comments": 0, "total_impact": 0, "invisible_pct": 0, "is_empty": True}
             ghosts = []
 
         status.update(label="✅ Analysis Complete!", state="complete")
@@ -395,27 +342,16 @@ def run_pipeline(username: str, _token_override: str = "") -> dict:
         "activity": activity,
         "sentiment": sentiment,
         "topics": topics,
+        "message_insights": message_insights,
         "badges": badges,
-        "wc_path": wc_path,
         "commits": commits,
         "quality": quality,
-        "repo_scores": repo_scores,
-        "health_stats": health_stats,
         "user_stats": user_stats,
-        "arc_df": arc_df,
-        "arc_viz": arc_viz,
-        "dna_traits": dna_traits,
-        "dna_svg": dna_svg,
-        "ecosystem_html": ecosystem_html,
         "narrative": narrative,
         "achievements": achievements,
-        "capsule": capsule,
         "job_roles": job_roles,
-        "review_personality": review_personality,
         "rewrites": rewrites,
-        "bus_stats": bus_stats,
         "streak_stats": streak_stats,
-        "invisible_stats": invisible_stats,
         "ghosts": ghosts,
     }
 
@@ -629,12 +565,9 @@ else:
     sentiment     = data["sentiment"]
     topics        = data["topics"]
     badges        = data["badges"]
-    wc_path       = data["wc_path"]
     repos         = data["repos"]
     commits       = data["commits"]
     quality       = data["quality"]
-    repo_scores   = data["repo_scores"]
-    health_stats  = data["health_stats"]
 
     # Header with Card Generator
     c1, c2 = st.columns([3, 1])
@@ -662,10 +595,6 @@ else:
                <div style="text-align:center;">
                  <div style="font-size:1.2rem; font-weight:800; color:#6C63FF;">{data['streak_stats']['longest']}</div>
                  <div style="font-size:0.65rem; color:#CBD5E1; text-transform:uppercase;">Longest Streak</div>
-               </div>
-               <div style="text-align:center;">
-                 <div style="font-size:1.2rem; font-weight:800; color:#22D3EE;">{data['invisible_stats']['total_impact']}</div>
-                 <div style="font-size:0.65rem; color:#CBD5E1; text-transform:uppercase;">Community Impact</div>
                </div>
             </div>
           </div>
@@ -695,112 +624,17 @@ else:
             </div>
             """, unsafe_allow_html=True)
 
-    # Feature 1: Code DNA Fingerprint (Always show for discovery)
-    st.divider()
-    st.markdown('<div class="section-header">🧬 Code DNA Fingerprint</div>', unsafe_allow_html=True)
-    if data.get("dna_traits", {}).get("enough_data", False):
-        col1, col2 = st.columns([1, 1.5], gap="large")
-        with col1:
-            st.markdown(f'<div style="text-align:center; background: rgba(255,255,255,0.03); border-radius:30px; padding:20px;">{data["dna_svg"]}</div>', unsafe_allow_html=True)
-        with col2:
-            st.markdown("Every developer has unconscious stylistic patterns. We've mapped your unique coding fingerprint based on your most recent work.")
-            traits = data.get("dna_traits", {})
-            st.markdown(f"""
-            <div class="glass-card" style="padding:1.5rem; border-color:#6C63FF;">
-                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:1.5rem;">
-                    <div>
-                        <div style="color:#94A3B8; font-size:0.8rem;">Comment Density</div>
-                        <div style="font-size:1.3rem; font-weight:700;">{traits.get('comment_density', 0):.1f}%</div>
-                    </div>
-                    <div>
-                        <div style="color:#94A3B8; font-size:0.8rem;">Brace Style</div>
-                        <div style="font-size:1.3rem; font-weight:700;">{traits.get('brace_style', 'Standard').replace('_', ' ').title()}</div>
-                    </div>
-                    <div>
-                        <div style="color:#94A3B8; font-size:0.8rem;">Naming</div>
-                        <div style="font-size:1.3rem; font-weight:700;">{traits.get('naming', 'Default')}</div>
-                    </div>
-                    <div>
-                        <div style="color:#94A3B8; font-size:0.8rem;">Indentation</div>
-                        <div style="font-size:1.3rem; font-weight:700;">{traits.get('indent', 'Spaces').title()}</div>
-                    </div>
-                </div>
-                <div style="margin-top:1.5rem; padding-top:1rem; border-top:1px solid rgba(108,99,255,0.2);">
-                    <div style="color:#94A3B8; font-size:0.8rem;">Avg Function Length</div>
-                    <div style="font-size:1.3rem; font-weight:700;">{traits.get('avg_func_len', 15):.0f} lines</div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-    else:
-        st.info("🧬 **DNA Analysis: Insufficient Data.** This section requires at least 3 scannable code files across your public repositories to build a reliable coding fingerprint.")
-
-
     # Feature 12: Hidden Achievements (Always try to show some)
     unlocked = [a for a in data.get("achievements", []) if a["unlocked"]]
     if unlocked:
-        st.markdown('<div style="margin-top: -1rem; margin-bottom: 1.5rem; display: flex; gap: 10px; flex-wrap: wrap;">', unsafe_allow_html=True)
-        for a in unlocked:
-            st.markdown(f'<span title="{a["desc"]}" style="background: rgba(249,168,38,0.1); border: 1px solid #F9A826; color: #F9A826; padding: 4px 12px; border-radius: 20px; font-size: 0.8rem; font-weight: 600;">{a["emoji"]} {a["name"]}</span>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-
-
-    # Feature 8 & 5: Sentiment & Ecosystem
-    col_s, col_e = st.columns([1, 1], gap="large")
-    with col_s:
-        st.markdown('<div class="section-header">🎭 Commit Sentiment & Vibe</div>', unsafe_allow_html=True)
-        polarity = data["sentiment"].get("avg_polarity", 0)
-        mood = data["sentiment"].get("mood", "Neutral 😐")
-        color = "#22D3EE" if polarity > 0.1 else "#EC4899" if polarity < -0.05 else "#F9A826"
-        
-        fig = go.Figure(go.Indicator(
-            mode = "gauge+number",
-            value = polarity,
-            domain = {'x': [0, 1], 'y': [0, 1]},
-            title = {'text': mood, 'font': {'size': 20, 'color': color}},
-            gauge = {
-                'axis': {'range': [-1, 1], 'tickwidth': 1, 'tickcolor': "white"},
-                'bar': {'color': color},
-                'bgcolor': "rgba(0,0,0,0)",
-                'borderwidth': 2,
-                'bordercolor': "rgba(255,255,255,0.1)",
-                'steps': [
-                    {'range': [-1, -0.1], 'color': 'rgba(236,72,153,0.1)'},
-                    {'range': [-0.1, 0.1], 'color': 'rgba(249,168,38,0.1)'},
-                    {'range': [0.1, 1], 'color': 'rgba(34,211,238,0.1)'}
-                ],
-            }
-        ))
-        fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", font={'color': "white"}, height=250, margin=dict(t=40, b=10, l=30, r=30))
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Sentiment Breakdown Pct
-        s = data["sentiment"]
-        st.markdown(f"""
-        <div style="display:flex; justify-content:space-between; margin-top:-1rem; margin-bottom:1rem; padding:0 10px;">
-            <div style="color:#22D3EE; font-size:0.75rem;">Positive: {s.get('pos_pct', 0)}%</div>
-            <div style="color:#F9A826; font-size:0.75rem;">Neutral: {s.get('neu_pct', 0)}%</div>
-            <div style="color:#EC4899; font-size:0.75rem;">Negative: {s.get('neg_pct', 0)}%</div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Feature 8: Review Personality
-        rp = data.get("review_personality", {})
-        if rp.get("advice"):
-            with st.expander("🛠️ PR Review Strategy"):
-                st.markdown(f"**Archetype:** {rp.get('archetype', 'The Observer')}")
-                st.markdown(f"**Trait:** {rp.get('trait', 'Neutral')}")
-                st.info(rp.get("advice", ""))
-
-    with col_e:
-        st.markdown('<div class="section-header">🕸 Project Ecosystem</div>', unsafe_allow_html=True)
-        if data["ecosystem_html"]:
-            import streamlit.components.v1 as components
-            components.html(data["ecosystem_html"], height=300)
-        else:
-            st.markdown('<div class="glass-card" style="height:300px; display:flex; align-items:center; justify-content:center; color:#94A3B8;">Insufficient dependency data.</div>', unsafe_allow_html=True)
-
-    st.divider()
+        achievement_badges = "".join(
+            f'<span title="{a["desc"]}" style="background: rgba(249,168,38,0.1); border: 1px solid #F9A826; color: #F9A826; padding: 4px 12px; border-radius: 20px; font-size: 0.8rem; font-weight: 600;">{a["emoji"]} {a["name"]}</span>'
+            for a in unlocked
+        )
+        st.markdown(
+            f'<div style="margin-top: -1rem; margin-bottom: 1.5rem; display: flex; gap: 10px; flex-wrap: wrap;">{achievement_badges}</div>',
+            unsafe_allow_html=True,
+        )
 
 
 
@@ -822,15 +656,6 @@ else:
     
     st.divider()
 
-    # Career Arc Visualizer (Feature 3)
-    st.markdown('<div class="section-header">📈 Career Evolution Timeline</div>', unsafe_allow_html=True)
-    if data["arc_viz"]:
-        st.plotly_chart(data["arc_viz"], use_container_width=True)
-        with st.expander("🔍 Career Insights"):
-            df = data["arc_df"]
-            for _, row in df.iterrows():
-                st.markdown(f"**{row['year']}**: Dominant in **{row['language']}** with a focus on **{row['topic']}**. Volume: {row['commit_count']} commits.")
-
     # Lang & Activity
     col_left, col_right = st.columns(2, gap="large")
     with col_left:
@@ -847,10 +672,8 @@ else:
 
 
     # WordCloud & NLP & Quality
-    col_wc, col_nlp = st.columns([1.1, 1], gap="large")
-    with col_wc:
-        st.markdown('<div class="section-header">☁️ Commit WordCloud</div>', unsafe_allow_html=True)
-        if wc_path: st.image(wc_path, use_container_width=True)
+    col_quality, col_nlp = st.columns([1.1, 1], gap="large")
+    with col_quality:
         
         # QUALITY SCORE
         st.markdown('<div class="section-header" style="margin-top:1.5rem;">📝 Commit Quality Report</div>', unsafe_allow_html=True)
@@ -880,103 +703,39 @@ else:
                         """, unsafe_allow_html=True)
 
 
-
-    # REPO HEALTH DASHBOARD
-    st.divider()
-    st.markdown(f'<div class="section-header">📦 Repo Health Dashboard <span style="font-size:0.8rem; font-weight:normal; color:#64748B;">({health_stats["emoji"]} {health_stats["label"]}: {health_stats["maintainer_score"]}/100 | Grade: {health_stats.get("grade", "N/A")})</span></div>', unsafe_allow_html=True)
-    
-    health_cols = st.columns(3, gap="medium")
-    sorted_health = sorted(repo_scores, key=lambda r: r["stars"], reverse=True)[:6]
-    for i, r in enumerate(sorted_health):
-        with health_cols[i % 3]:
-            # Construct health pill HTML
-            pills = []
-            for sig, val in r["signals"].items():
-                if sig in ["has_readme", "has_license", "has_ci", "has_tests"]:
-                    label = sig.replace("has_", "").upper()
-                    cls = "health-pass" if val else "health-fail"
-                    pills.append(f'<span class="health-pill {cls}">{label}</span>')
-            
-            pills_html = " ".join(pills)
-
-            st.markdown(f"""
-            <div class="glass-card" style="padding:1rem;">
-                <div style="display:flex; justify-content:space-between; align-items:flex-start;">
-                    <div style="font-weight:600; color:#FFFFFF; font-size:0.9rem;">📁 {r['name']}</div>
-                    <div style="font-size:1.1rem;">{r['emoji']}</div>
-                </div>
-                <div style="margin:0.5rem 0; display:flex; gap:0.3rem; flex-wrap:wrap;">
-                    {pills_html}
-                </div>
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-top:0.5rem;">
-                    <div style="font-size:0.75rem; color:#CBD5E1;">⭐ {r['stars']} | {r['language']}</div>
-                    <div style="font-size:0.8rem; font-weight:700; color:#FFFFFF;">Score: {r['score']}</div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+    with col_nlp:
+        st.markdown('<div class="section-header">Commit Language Insights</div>', unsafe_allow_html=True)
+        insights = data.get("message_insights", {})
+        intent_counts = insights.get("intent_counts", {})
+        if intent_counts:
+            intent_df = pd.DataFrame(
+                [{"Intent": name, "Commits": count} for name, count in intent_counts.items()]
+            ).sort_values("Commits", ascending=True)
+            intent_fig = go.Figure(go.Bar(
+                x=intent_df["Commits"], y=intent_df["Intent"], orientation="h",
+                marker_color="#A855F7", text=intent_df["Commits"], textposition="outside",
+            ))
+            intent_fig.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font={"color": "white"}, height=260,
+                margin=dict(t=10, b=10, l=10, r=35),
+                xaxis={"visible": False}, yaxis={"title": ""},
+            )
+            st.plotly_chart(intent_fig, use_container_width=True)
+            st.caption("Intent labels are keyword-based estimates from commit messages.")
+            m1, m2 = st.columns(2)
+            m1.metric("Avg. words per message", insights.get("avg_words", 0))
+            m2.metric("Vocabulary variety", f'{insights.get("vocabulary_richness", 0):.0%}')
+            if insights.get("keywords"):
+                st.markdown("**Recurring terms**")
+                st.markdown(" ".join(f'<span class="topic-pill">{word}</span>' for word in insights["keywords"]), unsafe_allow_html=True)
+        else:
+            st.info("No commit messages were available for language analysis.")
 
 
-    # DEEP DATA METRICS SECTION
-    st.divider()
-    col_bus, col_ghost = st.columns(2, gap="large")
-    
-    with col_bus:
-        st.markdown('<div class="section-header">🚌 Bus Factor Estimation</div>', unsafe_allow_html=True)
-        bus = data["bus_stats"]
-        bus_ratio = f"{bus['avg_factor']}" if bus.get("avg_factor", 0) else "N/A"
-        bus_note = (
-            f"Calculated from {bus.get('repos_analyzed', 0)} repos with contributor history."
-            if bus.get("repos_analyzed", 0)
-            else "GitHub has not returned contributor history yet. Retry in a bit or use a token with enough API quota."
-        )
-        st.markdown(f"""
-        <div class="glass-card" style="padding:1.5rem;">
-          <div style="display:flex; justify-content:space-between; align-items:center;">
-            <div>
-              <div style="font-size:0.8rem; color:#CBD5E1;">CENTRALIZATION RISK</div>
-              <div style="font-size:1.5rem; font-weight:700;">{bus['risk']}</div>
-            </div>
-            <div style="text-align:right;">
-              <div style="font-size:2rem; font-weight:800; color:#6C63FF;">{bus_ratio}</div>
-              <div style="font-size:0.7rem; color:#E2E8F0;">AVG RATIO</div>
-            </div>
-          </div>
-          <div style="margin-top:1rem; font-size:0.85rem; color:#E2E8F0;">
-            {bus_note}
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
 
-    with col_ghost:
-        st.markdown('<div class="section-header">🛡️ Invisible Work Audit</div>', unsafe_allow_html=True)
-        inv = data.get("invisible_stats", {"prs": 0, "issues": 0, "reviews": 0, "issue_comments": 0, "total_impact": 0, "invisible_pct": 0, "is_empty": True})
-        st.markdown(f"""
-        <div class="glass-card" style="padding:1.5rem;">
-          <div style="display:grid; grid-template-columns: 1fr 1fr; gap:1.5rem;">
-            <div>
-              <div style="font-size:0.8rem; color:#CBD5E1;">PR REVIEWS</div>
-              <div style="font-size:1.5rem; font-weight:700; color:#22D3EE;">{inv['reviews']}</div>
-            </div>
-            <div>
-              <div style="font-size:0.8rem; color:#CBD5E1;">TOTAL IMPACT</div>
-              <div style="font-size:1.5rem; font-weight:700; color:#EC4899;">{inv['total_impact']}</div>
-            </div>
-          </div>
-          <div style="display:grid; grid-template-columns: 1fr 1fr; gap:1.5rem; margin-top:1rem;">
-            <div>
-              <div style="font-size:0.8rem; color:#CBD5E1;">PRS AUTHORED</div>
-              <div style="font-size:1.2rem; font-weight:700; color:#FFFFFF;">{inv['prs']}</div>
-            </div>
-            <div>
-              <div style="font-size:0.8rem; color:#CBD5E1;">ISSUE COMMENTS</div>
-              <div style="font-size:1.2rem; font-weight:700; color:#FFFFFF;">{inv['issue_comments']}</div>
-            </div>
-          </div>
-          <div style="margin-top:1rem; font-size:0.85rem; color:#E2E8F0;">
-            {('About <b>' + str(inv["invisible_pct"]) + '%</b> of visible public collaboration comes from reviews, issues, and comments outside direct PR authorship.') if not inv.get("is_empty") else 'No public PRs, issues, reviews, or issue comments found. This is normal for developers working mostly in personal repos or private collaboration spaces.'}
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+
+    render_repository_nlp(profile["login"], repos, get_configured_github_token() or token)
 
     # Ghost Repo Audit (if any)
     ghosts = data.get("ghosts", [])
@@ -1003,8 +762,4 @@ else:
     # ------------------------------------------------------------------ #
     #  Footer
     # ------------------------------------------------------------------ #
-st.markdown("""
-<div style="text-align:center;padding:2rem 0 1rem;color:#475569;font-size:0.8rem;">
-  Built with ❤️ using PyGithub · Streamlit · Plotly · scikit-learn · TextBlob · WordCloud
-</div>
-""", unsafe_allow_html=True)
+st.caption("Built with PyGithub, Streamlit, Plotly, TF-IDF, and TextBlob")
